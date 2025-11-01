@@ -1,0 +1,17 @@
+to set up HTTPS certificates, in the terminal do the following commands:
+brew install mkcert
+mkcert -install
+cd server/permissions
+IP=$(ipconfig getifaddr en0 || ipconfig getifaddr en1)
+mkcert "$IP" 127.0.0.1 localhost
+
+you will have the certificates generated in the permissions/ folder
+
+then airdrop
+  permissions/$IP+2.pem
+to iPhone
+
+go to
+  parameters > general > about > certificate trust settings
+
+then you can access to https://<IP>:8000

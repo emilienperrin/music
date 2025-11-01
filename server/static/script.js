@@ -80,7 +80,7 @@ broadcastButton.addEventListener('click', () => {
 
   if (broadcasting) {
     sendPing();
-    intervalId = setInterval(sendPing, 10000);
+    intervalId = setInterval(sendPing, 1000);
     if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
   } else {
     if (intervalId) clearInterval(intervalId);
