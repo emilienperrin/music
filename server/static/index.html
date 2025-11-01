@@ -14,10 +14,17 @@
       <span id="txStatus" class="badge">Diffusion inactive</span>
     </div>
 
-    <div class="controls">
-      <button id="broadcastButton" class="primary">Lancer la diffusion</button>
-      <button id="sendMessageButton">Envoyer ping</button>
-    </div>
+  <div class="controls">
+    <label class="switch">
+      <input type="checkbox" id="modeSwitch">
+      <span class="slider"></span>
+      <span class="switch-label" id="switchLabel">Streaming</span>
+    </label>
+
+    <button id="broadcastButton" class="primary">Lancer la diffusion</button>
+    <button id="sendMessageButton">Envoyer ping</button>
+  </div>
+
 
     <div class="log-container" id="log-container"></div>
   </div>

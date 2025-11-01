@@ -89,3 +89,59 @@ button.stop    { background: linear-gradient(180deg, #ef4444, #b91c1c); border-c
 .flash-out { animation: flashOut 1s ease-out; }
 .flash-sys { animation: flashSys 1s ease-out; }
 /* ======================== Fin animation ======================== */
+
+/* ======================== Apple-style switch ======================== */
+.switch {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch input {
+  display: none;
+}
+
+/* Slider container */
+.slider {
+  position: relative;
+  width: 52px;
+  height: 28px;
+  background-color: #2563eb; /* bleu streaming */
+  border-radius: 999px;
+  transition: background-color 0.3s ease;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
+}
+
+/* The bubble */
+.slider::before {
+  content: "";
+  position: absolute;
+  height: 22px;
+  width: 22px;
+  left: 3px;
+  top: 3px;
+  background-color: #fff;
+  border-radius: 50%;
+  transition: transform 0.3s ease;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.25);
+}
+
+/* Recording mode */
+input:checked + .slider {
+  background-color: #f97316; /* orange recording */
+}
+
+input:checked + .slider::before {
+  transform: translateX(24px);
+}
+
+/* Label text */
+.switch-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+/* ======================== Fin switch ======================== */

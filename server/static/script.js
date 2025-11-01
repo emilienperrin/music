@@ -3,9 +3,13 @@ const wsBadge = document.getElementById('wsStatus');
 const txBadge = document.getElementById('txStatus');
 const broadcastButton = document.getElementById('broadcastButton');
 const sendMessageButton = document.getElementById('sendMessageButton');
+const modeSwitch   = document.getElementById('modeSwitch');
+const switchLabel  = document.getElementById('switchLabel');
 
 const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
 let ws;
+let wsOk = false;
+let wsText = 'Déconnecté'; 
 let broadcasting = false;
 
 let streamingIntervalId = null;
@@ -40,21 +44,28 @@ function logOut(text) { addLogLine("out", `→ ${text}`); }
 function logSys(text) { addLogLine("sys", `→ ${text}`); }
 
 // ---- ui ----
-function setWsState(ok, text) {
-  wsBadge.textContent = text || (ok ? 'Connecté' : 'Déconnecté');
-  wsBadge.classList.toggle('ok', ok);
-  wsBadge.classList.toggle('err', !ok);
-}
 
-function setTxState(active) {
-  txBadge.textContent = active ? 'Diffusion active' : 'Diffusion inactive';
-  txBadge.classList.toggle('ok', active);
+function updateUI() {
+  // update connection state
+  wsBadge.textContent = wsText || (wsOk ? 'Connecté' : 'Déconnecté');
+  wsBadge.classList.toggle('ok', wsOk);
+  wsBadge.classList.toggle('err', !wsOk);
+
+  // update mode label
+  switchLabel.textContent = modeSwitch.checked ? 'Recording' : 'Streaming';
+
+  // update tx state
+  txBadge.textContent = broadcasting ? 'Diffusion active' : 'Diffusion inactive';
+  txBadge.classList.toggle('ok', broadcasting);
   txBadge.classList.toggle('err', false);
-  broadcastButton.textContent = active ? 'Stopper la diffusion' : 'Lancer la diffusion';
-  broadcastButton.classList.toggle('primary', !active);
-  broadcastButton.classList.toggle('stop', active);
+  if (modeSwitch.checked) {
+    broadcastButton.textContent = broadcasting ? 'Stop' : 'Enregistrer un geste';
+  } else {
+    broadcastButton.textContent = broadcasting ? 'Stopper la diffusion' : 'Lancer la diffusion';
+  }
+  broadcastButton.classList.toggle('primary', !broadcasting);
+  broadcastButton.classList.toggle('stop', broadcasting);
 }
-
 // ---- iphone ----
 async function requestSensorPermissions() {
   const needsDOMP = typeof DeviceMotionEvent !== 'undefined'
@@ -122,16 +133,16 @@ function updateSnapshotFromOrientation(snapshot, ev) {
   snapshot.ts = Date.now();
 }
 
-// ---- streaming ----
-
 // ---- websocket ----
 function connectWS() {
-  setWsState(false, 'Connexion…');
+  wsOk = false; wsText = 'Connexion…';
   ws = new WebSocket(wsUrl);
+  updateUI();
 
   ws.addEventListener('open', () => {
-    setWsState(true, 'Connecté');
+    wsOk = true; wsText = 'Connecté';
     logSys('WebSocket ouvert.');
+    updateUI();
   });
 
   ws.addEventListener('message', (ev) => {
@@ -139,20 +150,22 @@ function connectWS() {
   });
 
   ws.addEventListener('close', () => {
-    setWsState(false, 'Déconnecté');
+    wsOk = false; wsText = 'Déconnecté';
     logSys('WebSocket fermé.');
     if (broadcasting) setTimeout(connectWS, 1000);
+    updateUI();
   });
 
   ws.addEventListener('error', () => {
-    setWsState(false, 'Erreur');
+    wsOk = false; wsText = 'Erreur';
     logSys('Erreur WebSocket.');
+    updateUI();
   });
 }
 
 function sendPing() {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    const msg = 'ping';
+    const msg = JSON.stringify({ type: 'message', message: "ping" });
     ws.send(msg);
     logOut(msg);
   } else {
@@ -162,7 +175,8 @@ function sendPing() {
 
 function sendSensorSnapshot() {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    const msg = JSON.stringify({ type: 'sensorSnapshot', data: sensorSnapshot });
+    const mode = modeSwitch && modeSwitch.checked ? 'record' : 'stream';
+    const msg = JSON.stringify({ type: 'sensorSnapshot', mode, data: sensorSnapshot });
     ws.send(msg);
     logOut('sensorSnapshot ' + msg);
   } else {
@@ -170,15 +184,19 @@ function sendSensorSnapshot() {
   }
 }
 
+// ---- ui events ----
+modeSwitch.addEventListener('change', updateUI);
+
 broadcastButton.addEventListener('click', async () => {
   if(broadcasting) { // stop broadcasting
     broadcasting = !broadcasting;
-    setTxState(broadcasting);
 
     stopSensorListeners();
     
     if (streamingIntervalId) clearInterval(streamingIntervalId);
     streamingIntervalId = null;
+
+    updateUI();
 
   } else { // start broadcasting
     const permissionGranted = await requestSensorPermissions();
@@ -187,7 +205,7 @@ broadcastButton.addEventListener('click', async () => {
       return;
     }
     broadcasting = !broadcasting;
-    setTxState(broadcasting);
+    updateUI();
 
     startSensorListeners();
 
@@ -200,4 +218,4 @@ broadcastButton.addEventListener('click', async () => {
 sendMessageButton.addEventListener('click', sendPing);
 
 connectWS();
-setTxState(false);
+updateUI();
