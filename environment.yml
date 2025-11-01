@@ -1,0 +1,10 @@
+name: iachm
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python
+  - websockets
+  - uvicorn
+  - fastapi
+prefix: /opt/anaconda3/envs/iachm

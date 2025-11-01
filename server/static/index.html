@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>IACHM - Music</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="card">
+    <h1>Diffusion</h1>
+    <div class="row">
+      <span id="wsStatus" class="badge">Connexion…</span>
+      <span id="txStatus" class="badge">Diffusion inactive</span>
+    </div>
+
+    <div class="controls">
+      <button id="broadcastButton" class="primary">Lancer la diffusion</button>
+      <button id="sendMessageButton">Envoyer ping</button>
+    </div>
+
+    <div class="log-container" id="log-container"></div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
