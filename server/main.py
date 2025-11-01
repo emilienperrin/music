@@ -7,14 +7,16 @@ import json
 import csv
 import pandas as pd
 import traceback
+import os
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-PROJECT_FOLDER = Path(__file__).parent
-GESTURES_DIR = PROJECT_FOLDER / "gestures"
-GESTURES_DIR.mkdir(exist_ok=True)
-gesturesCatalog_path = GESTURES_DIR / "gestures_catalog.csv"
+PROJECT_FOLDER = str(Path(__file__).parent.parent)
+GESTURES_DIR = f'{PROJECT_FOLDER}/data/gestures'
+os.makedirs(GESTURES_DIR, exist_ok=True)
+
+gesturesMaster_path = f'{PROJECT_FOLDER}/data/gestures.csv'
 
 @app.get("/")
 async def root():
@@ -33,7 +35,7 @@ def _getCSV(csv_path):
     """Open CSV file and return writer, creating header if needed."""
     csv_file = open(csv_path, "a", newline="", encoding="utf-8")
     csv_writer = csv.writer(csv_file)
-    if csv_path.stat().st_size == 0:
+    if Path(csv_path).stat().st_size == 0:
         csv_writer.writerow([
             "server_ts", "client_ts",
             "accel_x", "accel_y", "accel_z",
@@ -76,12 +78,12 @@ class sensorSnapshot:
 class Gesture:
     @staticmethod
     def currentId():
-        if not gesturesCatalog_path.exists():
+        if not os.path.exists(gesturesMaster_path):
             df = pd.DataFrame(columns=["gesture_id","client_id","start_ts","file_path"])
-            df.to_csv(gesturesCatalog_path, index=False)
+            df.to_csv(gesturesMaster_path, index=False)
             return 0
         try:
-            df = pd.read_csv(gesturesCatalog_path)
+            df = pd.read_csv(gesturesMaster_path)
             if df.empty:
                 return 0
             return int(df["gesture_id"].max()) + 1
@@ -89,12 +91,12 @@ class Gesture:
             return 0
 
     def __init__(self, client_id):
-        self.id = Gesture.currentId() + 1
+        self.id = Gesture.nextId()
         self.client_id = client_id
         datenow = datetime.now(timezone.utc)
         self.start_ts = datenow.strftime("%Y-%m-%d %H:%M:%S")
-        filename = f"gesture_{self.id}_{datenow.strftime('%Y%m%d_%H%M%S')}.csv"
-        self.path = GESTURES_DIR / filename
+        filename = f"gesture_{self.id}.csv"
+        self.path = f'{GESTURES_DIR}/{filename}'
 
         self.csv_file, self.csv_writer = _getCSV(self.path)
 
@@ -102,7 +104,7 @@ class Gesture:
         
     def register_gesture(self):
         try:
-            with open(gesturesCatalog_path, "a", newline="", encoding="utf-8") as f:
+            with open(gesturesMaster_path, "a", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerow([self.id, self.client_id, self.start_ts, self.path])
         except Exception as e:

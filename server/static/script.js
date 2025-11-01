@@ -258,13 +258,19 @@ broadcastButton.addEventListener('click', async () => {
         logSys('WebSocket non connecté. Impossible de lancer l\'enregistrement.');
         return;
       }
+
+      const permissionGranted = await requestSensorPermissions();
+      if (!permissionGranted) {
+        logSys('Permissions capteurs refusées — annulation de l\'enregistrement.');
+        return;
+      }
+
       const startMsg = JSON.stringify({ type: 'control', action: 'gesture_start' });
       ws.send(startMsg);
       logOut(startMsg);
       
       countdown();
       const afterCountdown = setTimeout(async () => {
-        const permissionGranted = await requestSensorPermissions();
         if (!permissionGranted) {
           logSys('Permissions capteurs refusées — annulation de l\'enregistrement.');
           if (ws && ws.readyState === WebSocket.OPEN) {
