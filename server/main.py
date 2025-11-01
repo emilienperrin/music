@@ -6,12 +6,15 @@ from pathlib import Path
 import json
 import csv
 import pandas as pd
+import traceback
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-RECORDINGS_DIR = Path("recordings")
-RECORDINGS_DIR.mkdir(exist_ok=True)
+PROJECT_FOLDER = Path(__file__).parent
+GESTURES_DIR = PROJECT_FOLDER / "gestures"
+GESTURES_DIR.mkdir(exist_ok=True)
+gesturesCatalog_path = GESTURES_DIR / "gestures_catalog.csv"
 
 @app.get("/")
 async def root():
@@ -70,6 +73,51 @@ class sensorSnapshot:
         snap.mag['source'] = payload.get('mag', {}).get('source')
         return snap
 
+class Gesture:
+    @staticmethod
+    def currentId():
+        if not gesturesCatalog_path.exists():
+            df = pd.DataFrame(columns=["gesture_id","client_id","start_ts","file_path"])
+            df.to_csv(gesturesCatalog_path, index=False)
+            return 0
+        try:
+            df = pd.read_csv(gesturesCatalog_path)
+            if df.empty:
+                return 0
+            return int(df["gesture_id"].max()) + 1
+        except Exception:
+            return 0
+
+    def __init__(self, client_id):
+        self.id = Gesture.currentId() + 1
+        self.client_id = client_id
+        datenow = datetime.now(timezone.utc)
+        self.start_ts = datenow.strftime("%Y-%m-%d %H:%M:%S")
+        filename = f"gesture_{self.id}_{datenow.strftime('%Y%m%d_%H%M%S')}.csv"
+        self.path = GESTURES_DIR / filename
+
+        self.csv_file, self.csv_writer = _getCSV(self.path)
+
+        self.register_gesture()
+        
+    def register_gesture(self):
+        try:
+            with open(gesturesCatalog_path, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow([self.id, self.client_id, self.start_ts, self.path])
+        except Exception as e:
+            print(f"[WS] Erreur enregistrement gesture index: {e}")
+
+    def write(self, snapshot: sensorSnapshot):
+        self.csv_writer.writerow(snapshot.getRow())
+        try:
+            self.csv_file.flush()
+        except Exception:
+            pass
+    
+    def finish(self):
+        self.csv_file.close()
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -77,18 +125,8 @@ async def websocket_endpoint(websocket: WebSocket):
     print(f"[WS] Client connecté: {client.host}:{client.port}")
 
     client_id = f"{client.host}"
-    client_dir = RECORDINGS_DIR / client_id
-    client_dir.mkdir(parents=True, exist_ok=True)
-
-    session_name = pd.Timestamp.now(tz='Europe/Paris').strftime("%Y%m%d_%H%M%S")
-    csv_path = client_dir / f"snapshots_{session_name}.csv"
-
-    # open CSV file (append) and write header if new file
-    try:
-        csv_file, csv_writer = _getCSV(csv_path)        
-    except Exception as e:
-        print(f"[WS] Erreur ouverture CSV pour {client_id}: {e}")
-
+    
+    gesture = None
     try:
         while True:
             data = await websocket.receive_text()
@@ -105,25 +143,54 @@ async def websocket_endpoint(websocket: WebSocket):
                     if response_text:
                         await websocket.send_text(response_text)
                         print(f"[{stamp}] → {response_text}")
+                elif isinstance(obj, dict) and obj.get("type") == "control":
+                    action = obj.get("action")
+                    if action == "gesture_start":
+                        if not gesture is None:
+                            print(f"[WS] gesture_start reçu mais un geste est déjà actif pour {client_id}")
+                        else:
+                            try:
+                                gesture = Gesture(client_id)
+                                print(f"[WS] gesture_start {gesture.id} for {client_id}")
+                            except Exception as e:
+                                gesture = None
+                                print(f"[WS] erreur initialisation gesture for {client_id}: {e}")
+                    elif action == "gesture_end":
+                        if gesture is None:
+                            print(f"[WS] gesture_end reçu mais aucun geste actif pour {client_id}")
+                        else:
+                            try:
+                                try:
+                                    gesture.finish()
+                                except Exception:
+                                    pass
+                                print(f"[WS] gesture_end gesture_id={gesture.id} closed for {client_id}")
+                            finally:
+                                gesture = None
                 elif isinstance(obj, dict) and obj.get("type") == "sensorSnapshot":
                     mode = obj.get("mode")
                     payload = obj.get("data") or {}
 
-                    if mode == "record" and csv_writer is not None:
-                        server_ts = pd.Timestamp.now(tz='Europe/Paris').strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                        snap = sensorSnapshot.fromPayload(payload, serverTs=server_ts)
-                        csv_writer.writerow(snap.getRow())
-                        try:
-                            csv_file.flush()
-                        except Exception:
-                            pass
+                    if mode == "record":
+                        if gesture is not None:
+                            server_ts = pd.Timestamp.now(tz='Europe/Paris').strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                            snapshot = sensorSnapshot.fromPayload(payload, serverTs=server_ts)
+                            try:
+                                gesture.write(snapshot)
+                            except Exception as e:
+                                print(f"[WS] Erreur écriture snapshot gesture_id={gesture.get('gesture_id')} : {e}")
+                        else:
+                            print(f"[WS] snapshot en mode 'record' reçu mais pas de geste actif pour {client_id}")
             except Exception:
-                print(f"[WS] Erreur traitement message de {client_id}")
+                err_traceback = traceback.format_exc()
+                print(f"[WS] Erreur traitement message de {client_id}: \n{err_traceback}")
                 pass
     except WebSocketDisconnect:
         print(f"[WS] Client déconnecté: {client.host}:{client.port}")
     finally:
         try:
-            if csv_file: csv_file.close()
+            if gesture is not None:
+                gesture.finish()
+                print(f"[WS] gesture_id={gesture.id} closed for {client_id} on disconnect")
         except Exception:
             pass

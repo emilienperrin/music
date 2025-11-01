@@ -12,8 +12,54 @@ let wsOk = false;
 let wsText = 'Déconnecté'; 
 let broadcasting = false;
 
-let streamingIntervalId = null;
-let streamingIntervalMs = 100; // 10 Hz
+let broadcastingIntervalId = null;
+let broadcastingIntervalMs = 100; // 10 Hz
+
+let countdownDurationS = 3;
+
+// [AJOUTER] état et utilitaires pour enregistrement de geste
+let gestureActive = false;
+let countdownTimers = [];
+let audioCtx = null;
+
+function playBeep(volume = 1, durationMs = 300, freq = 880) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    g.gain.setValueAtTime(volume, audioCtx.currentTime);
+    o.connect(g);
+    g.connect(audioCtx.destination);
+    o.start();
+    setTimeout(() => { try { o.stop(); } catch (e) {} }, durationMs);
+  } catch (e) {
+    // fallback silencieux si WebAudio inaccessible
+    console.warn('WebAudio failed:', e);
+  }
+}
+
+function clearCountdown() {
+  while (countdownTimers.length) {
+    clearTimeout(countdownTimers.shift());
+  }
+}
+function countdown() {
+  clearCountdown();
+  for (let i = 0; i < countdownDurationS+1; i++) {
+    const t = setTimeout(() => {
+      if (i === countdownDurationS) {
+        logSys(`Go! ⭕️`);
+        playBeep(1.5, 320, 880);
+      } else {
+        logSys(`${countdownDurationS - i}...`);
+        playBeep(0.35, 120, 620);
+      }
+    }, i * 1000);
+    countdownTimers.push(t);
+  }
+}
 
 const sensorSnapshot = {
   accel: { x: null, y: null, z: null },
@@ -52,7 +98,7 @@ function updateUI() {
   wsBadge.classList.toggle('err', !wsOk);
 
   // update mode label
-  switchLabel.textContent = modeSwitch.checked ? 'Recording' : 'Streaming';
+  switchLabel.textContent = modeSwitch.checked ? 'Recording' : 'Broadcasting';
 
   // update tx state
   txBadge.textContent = broadcasting ? 'Diffusion active' : 'Diffusion inactive';
@@ -175,7 +221,7 @@ function sendPing() {
 
 function sendSensorSnapshot() {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    const mode = modeSwitch && modeSwitch.checked ? 'record' : 'stream';
+    const mode = gestureActive ? 'record' : (modeSwitch && modeSwitch.checked ? 'record' : 'stream');
     const msg = JSON.stringify({ type: 'sensorSnapshot', mode, data: sensorSnapshot });
     ws.send(msg);
     logOut('sensorSnapshot ' + msg);
@@ -188,34 +234,90 @@ function sendSensorSnapshot() {
 modeSwitch.addEventListener('change', updateUI);
 
 broadcastButton.addEventListener('click', async () => {
-  if(broadcasting) { // stop broadcasting
-    broadcasting = !broadcasting;
+  // ---- gesture ----
+  if (modeSwitch.checked) {
+    if (gestureActive) {
+      stopSensorListeners();
+      if (broadcastingIntervalId) { clearInterval(broadcastingIntervalId); broadcastingIntervalId = null; }
 
-    stopSensorListeners();
-    
-    if (streamingIntervalId) clearInterval(streamingIntervalId);
-    streamingIntervalId = null;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const ctrl = JSON.stringify({ type: 'control', action: 'gesture_end' });
+        ws.send(ctrl);
+        logOut(ctrl);
+      } else {
+        logSys('WebSocket non connecté (impossible d\'envoyer gesture_end).');
+      }
 
-    updateUI();
+      gestureActive = false;
+      broadcasting = false;
 
-  } else { // start broadcasting
-    const permissionGranted = await requestSensorPermissions();
-    if (!permissionGranted) {
-      logSys('Impossible de lancer la diffusion!');
+      updateUI();
+      return;
+    } else {
+      if (!(ws && ws.readyState === WebSocket.OPEN)) {
+        logSys('WebSocket non connecté. Impossible de lancer l\'enregistrement.');
+        return;
+      }
+      const startMsg = JSON.stringify({ type: 'control', action: 'gesture_start' });
+      ws.send(startMsg);
+      logOut(startMsg);
+      
+      countdown();
+      const afterCountdown = setTimeout(async () => {
+        const permissionGranted = await requestSensorPermissions();
+        if (!permissionGranted) {
+          logSys('Permissions capteurs refusées — annulation de l\'enregistrement.');
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            const endMsg = JSON.stringify({ type: 'control', action: 'gesture_end' });
+            ws.send(endMsg);
+            logOut(endMsg);
+          }
+          clearCountdown();
+          updateUI();
+          return;
+        }
+
+        startSensorListeners();
+        gestureActive = true;
+        broadcasting = true;
+        if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
+        if (broadcastingIntervalId) clearInterval(broadcastingIntervalId);
+        broadcastingIntervalId = setInterval(sendSensorSnapshot, broadcastingIntervalMs);
+        updateUI();
+      }, (countdownDurationS+1) * 1000);
+      countdownTimers.push(afterCountdown);
+
+      updateUI();
       return;
     }
+  // ---- regular ----
+  } else {
     broadcasting = !broadcasting;
+
+    if (!broadcasting) {
+      stopSensorListeners();
+      
+      if (broadcastingIntervalId) clearInterval(broadcastingIntervalId);
+      broadcastingIntervalId = null;
+    } else {
+      const permissionGranted = await requestSensorPermissions();
+      if (!permissionGranted) {
+        logSys('Impossible de lancer la diffusion!');
+        updateUI();
+        return;
+      }
+      startSensorListeners();
+      if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
+      sendPing();
+      broadcastingIntervalId = setInterval(sendSensorSnapshot, broadcastingIntervalMs);
+    }
     updateUI();
-
-    startSensorListeners();
-
-    if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
-    sendPing();
-    streamingIntervalId = setInterval(sendSensorSnapshot, streamingIntervalMs);
+    return;
   }
 });
 
 sendMessageButton.addEventListener('click', sendPing);
 
+requestSensorPermissions();
 connectWS();
 updateUI();
