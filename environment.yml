@@ -7,4 +7,5 @@ dependencies:
   - websockets
   - uvicorn
   - fastapi
+  - pandas
 prefix: /opt/anaconda3/envs/iachm
