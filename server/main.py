@@ -8,15 +8,64 @@ import csv
 import pandas as pd
 import traceback
 import os
+import pickle
+import numpy as np
+import asyncio
+from math import exp, isfinite
+from collections import deque
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 PROJECT_FOLDER = str(Path(__file__).parent.parent)
+
+# gestures
 GESTURES_DIR = f'{PROJECT_FOLDER}/data/gestures'
 os.makedirs(GESTURES_DIR, exist_ok=True)
-
 gesturesMaster_path = f'{PROJECT_FOLDER}/data/gestures.csv'
+
+# data
+DATA_DIR = f'{PROJECT_FOLDER}/data'
+movesMaster_path = f'{DATA_DIR}/moves.csv'
+df_move = pd.read_csv(movesMaster_path)
+moves = df_move['move_name'].unique().tolist()
+
+# models
+MODELS_DIR = f'{PROJECT_FOLDER}/models'
+def load_models():
+    models = {}
+    for move in moves:
+        model_path = f'{MODELS_DIR}/model_{move}.pkl'
+        if not os.path.exists(model_path):
+            continue
+        with open(model_path, "rb") as file:
+            model = pickle.load(file)
+            models[move] = model
+
+    return models
+
+MODELS = load_models()
+
+WINDOW_SIZE = 50
+MIN_WINDOW_FOR_SCORE = 5
+PRIORS = [0.5, 0.5]
+
+async def score_model_async(model, X):
+    if model is None:
+        return float('-inf')
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, model.score, X)
+    except Exception as e:
+        return float('-inf')
+    
+def softmax_from_logs(logs):
+    logs = np.array(logs, dtype=float)
+    if np.all(np.isneginf(logs)):
+        return np.array([1.0/len(logs)] * len(logs))
+    m = np.max(logs[np.isfinite(logs)])
+    exps = np.exp(logs - m)
+    return exps / np.sum(exps)
 
 @app.get("/")
 async def root():
@@ -59,6 +108,13 @@ class sensorSnapshot:
             self.mag['heading'], self.mag['source'],
         ]
     
+    def getNp(self):
+        return [
+            self.accel['x'], self.accel['y'], self.accel['z'],
+            self.gyro['alpha'], self.gyro['beta'], self.gyro['gamma'],
+            self.mag['heading'],
+        ]
+    
     @staticmethod
     def fromPayload(payload, serverTs=None):
         snap = sensorSnapshot()
@@ -91,7 +147,7 @@ class Gesture:
             return 0
 
     def __init__(self, client_id):
-        self.id = Gesture.nextId()
+        self.id = Gesture.currentId()
         self.client_id = client_id
         datenow = datetime.now(timezone.utc)
         self.start_ts = datenow.strftime("%Y-%m-%d %H:%M:%S")
@@ -127,17 +183,21 @@ async def websocket_endpoint(websocket: WebSocket):
     print(f"[WS] Client connecté: {client.host}:{client.port}")
 
     client_id = f"{client.host}"
+
+    obs_buffer = deque(maxlen=WINDOW_SIZE)
     
     gesture = None
     try:
         while True:
             data = await websocket.receive_text()
             stamp = datetime.now().strftime("%H:%M:%S")
-            print(f"[{stamp}] ← {data}")
+            
 
             # basic replies (ping / bonjour)
             try:
                 obj = json.loads(data)
+                if not (isinstance(obj, dict) and obj.get("type") == "sensorSnapshot"):
+                    print(f"[{stamp}] ← {data}")
                 if isinstance(obj, dict) and obj.get("type") == "message":
                     data = obj.get("message", "")
                     if data == "ping":
@@ -173,16 +233,52 @@ async def websocket_endpoint(websocket: WebSocket):
                     mode = obj.get("mode")
                     payload = obj.get("data") or {}
 
+                    server_ts = pd.Timestamp.now(tz='Europe/Paris').strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                    snapshot = sensorSnapshot.fromPayload(payload, serverTs=server_ts)
+
                     if mode == "record":
                         if gesture is not None:
-                            server_ts = pd.Timestamp.now(tz='Europe/Paris').strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                            snapshot = sensorSnapshot.fromPayload(payload, serverTs=server_ts)
+                            
                             try:
                                 gesture.write(snapshot)
                             except Exception as e:
                                 print(f"[WS] Erreur écriture snapshot gesture_id={gesture.get('gesture_id')} : {e}")
                         else:
                             print(f"[WS] snapshot en mode 'record' reçu mais pas de geste actif pour {client_id}")
+
+                    elif mode == "stream":
+                        obs = snapshot.getNp()
+                        obs_buffer.append(obs)
+
+                        X = np.asarray(obs_buffer)  # shape (n_samples, n_features)
+                        n = X.shape[0]
+
+                        if n < MIN_WINDOW_FOR_SCORE:
+                            print(f'[WS] Pas assez de données pour scorer (n={n})')
+                            continue
+                        
+                        moves_list = list(MODELS.keys())
+                        task_list = [score_model_async(MODELS[m], X) for m in moves_list]
+
+                        raw_logliks = await asyncio.gather(*task_list)
+
+                        logliks = []
+                        results = []
+                        for move, raw in zip(moves_list, raw_logliks):
+                            if isinstance(raw, (int, float)) and isfinite(raw):
+                                ll = float(raw)
+                            else:
+                                ll = float('-inf')
+                            logliks.append(ll)
+                        
+                        probs = softmax_from_logs(logliks)
+                        for move, p in zip(moves_list, probs):
+                            results.append({
+                                'move': move,
+                                'probability': f'{p:.4f}',
+                            })
+
+                        print(f'[WS] logliks par move: {results}')
             except Exception:
                 err_traceback = traceback.format_exc()
                 print(f"[WS] Erreur traitement message de {client_id}: \n{err_traceback}")
