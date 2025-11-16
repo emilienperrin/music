@@ -25,17 +25,17 @@ os.makedirs(GESTURES_DIR, exist_ok=True)
 gesturesMaster_path = f'{PROJECT_FOLDER}/data/gestures.csv'
 
 # data
-DATA_DIR = f'{PROJECT_FOLDER}/data'
-movesMaster_path = f'{DATA_DIR}/moves.csv'
+DATA_FOLDER = f'{PROJECT_FOLDER}/data'
+movesMaster_path = f'{DATA_FOLDER}/moves.csv'
 df_move = pd.read_csv(movesMaster_path)
 moves = df_move['move_name'].unique().tolist()
 
 # models
-MODELS_DIR = f'{PROJECT_FOLDER}/models'
+MODELS_FOLDER = f'{PROJECT_FOLDER}/models'
 def load_models():
     models = {}
     for move in moves:
-        model_path = f'{MODELS_DIR}/model_{move}.pkl'
+        model_path = f'{MODELS_FOLDER}/model_{move}.pkl'
         if not os.path.exists(model_path):
             continue
         with open(model_path, "rb") as file:
@@ -46,9 +46,8 @@ def load_models():
 
 MODELS = load_models()
 
-WINDOW_SIZE = 50
-MIN_WINDOW_FOR_SCORE = 5
-PRIORS = [0.5, 0.5]
+WINDOW_SIZE = 200
+MIN_WINDOW_FOR_SCORE = 100
 
 async def score_model_async(model, X):
     if model is None:
@@ -176,6 +175,92 @@ class Gesture:
     def finish(self):
         self.csv_file.close()
 
+class StreamManager:
+    def __init__(self, client_id, window_size, min_window_for_score):
+        self.client_id = client_id
+        self.obs_buffer = deque(maxlen=window_size)
+        self.min_window_for_score = min_window_for_score
+        self.load_models()
+
+    def load_models(self):
+        self.models = load_models()
+    
+    async def handle_snapshot(self, snapshot: sensorSnapshot):
+        obs = snapshot.getNp()
+        self.obs_buffer.append(obs)
+        await self.predict()
+    
+    async def predict(self):
+        X = np.asarray(self.obs_buffer)
+        n = X.shape[0]
+
+        if n < self.min_window_for_score:
+            print(f'[WS] Pas assez de données pour scorer (n={n})')
+        
+        moves_list = list(self.models.keys())
+        task_list = [score_model_async(self.models[m], X) for m in moves_list]
+
+        raw_logliks = await asyncio.gather(*task_list)
+
+        logliks = []
+        results = []
+        for move, raw in zip(moves_list, raw_logliks):
+            if isinstance(raw, (int, float)) and isfinite(raw):
+                ll = float(raw)
+            else:
+                ll = float('-inf')
+            logliks.append(ll)
+        
+        if len(logliks) == 0:
+            print(f'[WS] Aucun modèle disponible pour le scoring')
+        else:
+            probs = softmax_from_logs(logliks)
+            for i, (move, p) in enumerate(zip(moves_list, probs)):
+                results.append({
+                    'move': move,
+                    'probability': f'{p:.4f}',
+                })
+                print(f"[WS] move={move.ljust(30)} prob={p:.4f} log={logliks[i]}")
+            print(f'')
+
+class RecordManager:
+    def __init__(self, client_id):
+        self.client_id = client_id
+        self.current_gesture = None
+
+    async def handle_snapshot(self, snapshot: sensorSnapshot):
+        if self.current_gesture is not None:
+            try:
+                self.current_gesture.write(snapshot)
+            except Exception as e:
+                print(f"[WS] Erreur écriture snapshot gesture_id={self.current_gesture.id} : {e}")
+        else:
+            print(f"[WS] snapshot en mode 'record' reçu mais pas de geste actif pour {self.client_id}")
+
+    def gesture_start(self):
+        if not self.current_gesture is None:
+            print(f"[WS] gesture_start reçu mais un geste est déjà actif pour {self.client_id}")
+        else:
+            try:
+                self.current_gesture = Gesture(self.client_id)
+                print(f"[WS] gesture_start {self.current_gesture.id} for {self.client_id}")
+            except Exception as e:
+                self.current_gesture = None
+                print(f"[WS] erreur initialisation gesture for {self.client_id}: {e}")
+
+    def gesture_end(self):
+        if self.current_gesture is None:
+            print(f"[WS] gesture_end reçu mais aucun geste actif pour {self.client_id}")
+        else:
+            try:
+                try:
+                    self.current_gesture.finish()
+                except Exception:
+                    pass
+                print(f"[WS] gesture_end gesture_id={self.current_gesture.id} closed for {self.client_id}")
+            finally:
+                self.current_gesture = None
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -183,8 +268,8 @@ async def websocket_endpoint(websocket: WebSocket):
     print(f"[WS] Client connecté: {client.host}:{client.port}")
 
     client_id = f"{client.host}"
-
-    obs_buffer = deque(maxlen=WINDOW_SIZE)
+    streamManager = StreamManager(client_id, WINDOW_SIZE, MIN_WINDOW_FOR_SCORE)
+    recordManager = RecordManager(client_id)
     
     gesture = None
     try:
@@ -192,7 +277,6 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_text()
             stamp = datetime.now().strftime("%H:%M:%S")
             
-
             # basic replies (ping / bonjour)
             try:
                 obj = json.loads(data)
@@ -208,27 +292,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 elif isinstance(obj, dict) and obj.get("type") == "control":
                     action = obj.get("action")
                     if action == "gesture_start":
-                        if not gesture is None:
-                            print(f"[WS] gesture_start reçu mais un geste est déjà actif pour {client_id}")
-                        else:
-                            try:
-                                gesture = Gesture(client_id)
-                                print(f"[WS] gesture_start {gesture.id} for {client_id}")
-                            except Exception as e:
-                                gesture = None
-                                print(f"[WS] erreur initialisation gesture for {client_id}: {e}")
+                        recordManager.gesture_start()
                     elif action == "gesture_end":
-                        if gesture is None:
-                            print(f"[WS] gesture_end reçu mais aucun geste actif pour {client_id}")
-                        else:
-                            try:
-                                try:
-                                    gesture.finish()
-                                except Exception:
-                                    pass
-                                print(f"[WS] gesture_end gesture_id={gesture.id} closed for {client_id}")
-                            finally:
-                                gesture = None
+                        recordManager.gesture_end()
                 elif isinstance(obj, dict) and obj.get("type") == "sensorSnapshot":
                     mode = obj.get("mode")
                     payload = obj.get("data") or {}
@@ -237,48 +303,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     snapshot = sensorSnapshot.fromPayload(payload, serverTs=server_ts)
 
                     if mode == "record":
-                        if gesture is not None:
-                            
-                            try:
-                                gesture.write(snapshot)
-                            except Exception as e:
-                                print(f"[WS] Erreur écriture snapshot gesture_id={gesture.get('gesture_id')} : {e}")
-                        else:
-                            print(f"[WS] snapshot en mode 'record' reçu mais pas de geste actif pour {client_id}")
-
+                        await recordManager.handle_snapshot(snapshot)
                     elif mode == "stream":
-                        obs = snapshot.getNp()
-                        obs_buffer.append(obs)
-
-                        X = np.asarray(obs_buffer)  # shape (n_samples, n_features)
-                        n = X.shape[0]
-
-                        if n < MIN_WINDOW_FOR_SCORE:
-                            print(f'[WS] Pas assez de données pour scorer (n={n})')
-                            continue
-                        
-                        moves_list = list(MODELS.keys())
-                        task_list = [score_model_async(MODELS[m], X) for m in moves_list]
-
-                        raw_logliks = await asyncio.gather(*task_list)
-
-                        logliks = []
-                        results = []
-                        for move, raw in zip(moves_list, raw_logliks):
-                            if isinstance(raw, (int, float)) and isfinite(raw):
-                                ll = float(raw)
-                            else:
-                                ll = float('-inf')
-                            logliks.append(ll)
-                        
-                        probs = softmax_from_logs(logliks)
-                        for move, p in zip(moves_list, probs):
-                            results.append({
-                                'move': move,
-                                'probability': f'{p:.4f}',
-                            })
-
-                        print(f'[WS] logliks par move: {results}')
+                        await streamManager.handle_snapshot(snapshot)
             except Exception:
                 err_traceback = traceback.format_exc()
                 print(f"[WS] Erreur traitement message de {client_id}: \n{err_traceback}")

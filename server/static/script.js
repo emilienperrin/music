@@ -13,7 +13,7 @@ let wsText = 'Déconnecté';
 let broadcasting = false;
 
 let broadcastingIntervalId = null;
-let broadcastingIntervalMs = 100; // 10 Hz
+let broadcastingIntervalMs = 10; // 100 Hz
 
 let countdownDurationS = 3;
 
