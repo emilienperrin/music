@@ -351,7 +351,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 pass
     except WebSocketDisconnect:
         print(f"[WS] Client déconnecté: {client.host}:{client.port}")
-        recordManager.stop_sound()
+        streamManager.stop_sound()
     finally:
         try:
             if gesture is not None:
