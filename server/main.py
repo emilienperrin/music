@@ -13,6 +13,7 @@ import numpy as np
 import asyncio
 from math import exp, isfinite
 from collections import deque
+import pygame
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -59,11 +60,12 @@ async def score_model_async(model, X):
         return float('-inf')
     
 def softmax_from_logs(logs):
+    temperature = 1000
     logs = np.array(logs, dtype=float)
     if np.all(np.isneginf(logs)):
         return np.array([1.0/len(logs)] * len(logs))
     m = np.max(logs[np.isfinite(logs)])
-    exps = np.exp(logs - m)
+    exps = np.exp((logs - m) / temperature)
     return exps / np.sum(exps)
 
 @app.get("/")
@@ -182,6 +184,10 @@ class StreamManager:
         self.min_window_for_score = min_window_for_score
         self.load_models()
 
+        pygame.mixer.init()
+        self.current_move = None
+        self.current_move_sound = None
+
     def load_models(self):
         self.models = load_models()
     
@@ -222,6 +228,39 @@ class StreamManager:
                 })
                 print(f"[WS] move={move.ljust(30)} prob={p:.4f} log={logliks[i]}")
             print(f'')
+
+        best_index = int(np.argmax(probs))
+        best_prob  = np.max(probs)
+        best_move = moves_list[best_index]
+        await self.play_sound(best_move, best_prob)
+
+    async def play_sound(self, move, prob):
+        sound_path = f"{DATA_FOLDER}/assets/{move}.mp3"
+
+        if not os.path.exists(sound_path):
+            print(f"[WS] Sound file not found: {sound_path}")
+            return
+        
+        if prob<0.8:
+            if not self.current_move_sound is None:
+                self.stop_sound()
+            return 
+        
+        if ((self.current_move==move) and (not self.current_move_sound is None)):
+            return
+        
+        if not self.current_move_sound is None:
+            self.stop_sound()
+
+        self.current_move_sound = pygame.mixer.Sound(sound_path)
+        self.current_move_sound.play(loops=-1)
+        self.current_move = move
+
+    def stop_sound(self):
+        if not self.current_move_sound is None:
+            self.current_move_sound.stop()
+            self.current_move_sound = None
+            self.current_move = None
 
 class RecordManager:
     def __init__(self, client_id):
@@ -312,6 +351,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 pass
     except WebSocketDisconnect:
         print(f"[WS] Client déconnecté: {client.host}:{client.port}")
+        recordManager.stop_sound()
     finally:
         try:
             if gesture is not None:
